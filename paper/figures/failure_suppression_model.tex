@@ -1,0 +1,52 @@
+\documentclass[tikz,border=10pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds}
+
+\definecolor{airaBlue}{RGB}{31,78,121}
+\definecolor{airaMid}{RGB}{46,117,182}
+\definecolor{airaLight}{RGB}{232,240,248}
+\definecolor{airaWarn}{RGB}{255,248,232}
+\definecolor{airaRed}{RGB}{192,0,0}
+\definecolor{airaGray}{RGB}{90,90,90}
+
+\begin{document}
+\begin{tikzpicture}[
+  font=\sffamily,
+  stage/.style={rounded corners=6pt, draw=airaMid, fill=airaLight, very thick, align=center, text width=3.2cm, minimum height=1.55cm},
+  note/.style={rounded corners=6pt, draw=airaBlue, fill=white, thick, align=left, text width=4.1cm, inner sep=7pt},
+  arrow/.style={->, >=Stealth, very thick, draw=airaMid, line cap=round, shorten <=5pt, shorten >=5pt},
+  title/.style={font=\sffamily\bfseries\large, text=airaBlue},
+  small/.style={font=\sffamily\small}
+]
+
+\node[title] at (0,3.55) {Failure-Suppression Model};
+\node[small, text=airaGray, align=center] at (0,2.95) {Conceptual path from evaluation pressure to quiet operational degradation};
+
+\node[stage] (reward) at (-5.9,0.7) {Reward and approval\\ pressure};
+\node[stage] (behavior) at (-1.95,0.7) {Preference for\\ continuity and\\ apparent success};
+\node[stage] (code) at (1.95,0.7) {Fail-soft code patterns};
+\node[stage] (system) at (5.9,0.7) {User-visible quiet\\ failure or\\ degraded guarantees};
+
+\draw[arrow] (reward.east) -- (behavior.west);
+\draw[arrow] (behavior.east) -- (code.west);
+\draw[arrow] (code.east) -- (system.west);
+
+\node[note] (audit) at (-2.6,-1.95) {\textbf{AIRA measurement stance}\\[2pt]
+Measure whether the system tells the truth about failure, not only whether it works on the happy path.};
+
+\node[note] (examples) at (2.6,-1.95) {\textbf{Typical code artifacts}\\[2pt]
+Swallowed exceptions\\
+Optimistic return values\\
+Distributed fallback logic\\
+Weak failure disclosure\\
+Environment-shaped safety relaxation};
+
+\draw[arrow] (behavior.south) -- (audit.north);
+\draw[arrow] (code.south) -- (examples.north);
+
+\node[draw=airaRed, rounded corners=6pt, very thick, fill=airaWarn, text width=12.4cm, align=center, inner sep=10pt] at (0,-4.7) {
+\textbf{Interpretation}\\[4pt]
+The model does not claim malicious intent. It proposes that systems optimized to avoid visible failure may learn to preserve acceptable appearance at the cost of explicit state honesty.
+};
+\end{tikzpicture}
+\end{document}
