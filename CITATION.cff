@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+title: AIRA Research Artifact
+message: If you use this research artifact, please cite the repository and the associated paper.
+type: software
+authors:
+  - family-names: Parris
+    given-names: William M.
+repository-code: https://github.com/BDB-Labs/aira-research
+url: https://github.com/BDB-Labs/aira-research
+license: MIT
+version: 1.0.0
+date-released: 2026-04-02
+abstract: >
+  Research artifact repository for AIRA (AI-Induced Risk Audit), including the paper,
+  aggregate empirical results, redacted manifests, and reproducibility materials for the
+  rebuilt balanced pilot and related follow-up analyses.

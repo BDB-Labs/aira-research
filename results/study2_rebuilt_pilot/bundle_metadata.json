@@ -1,0 +1,19 @@
+{
+  "arm_a_files": 300,
+  "arm_a_repos": 126,
+  "arm_b_files": 300,
+  "arm_b_repos": 21,
+  "strict_subset_arm_a_files": 300,
+  "strict_subset_arm_a_repos": 126,
+  "strict_subset_seed": 42,
+  "strict_subset_target_counts": {
+    "javascript:1000_plus": 1,
+    "javascript:100_299": 82,
+    "javascript:300_999": 17,
+    "python:100_299": 83,
+    "python:300_999": 17,
+    "typescript:1000_plus": 2,
+    "typescript:100_299": 84,
+    "typescript:300_999": 14
+  }
+}

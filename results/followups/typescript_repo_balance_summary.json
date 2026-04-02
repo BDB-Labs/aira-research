@@ -1,0 +1,14 @@
+{
+  "agent_bootstrap_ci95_high": 0.667,
+  "agent_bootstrap_ci95_low": 0.0,
+  "agent_bootstrap_mean_for_human_repo_count": 0.155,
+  "agent_repo_count": 55,
+  "agent_repo_weighted_high_per_file": 0.159,
+  "human_repo_count": 6,
+  "human_repo_count_excluding_outlier": 5,
+  "human_repo_weighted_high_per_file": 3.706,
+  "human_repo_weighted_high_per_file_excluding_outlier": 0.048,
+  "outlier_repo": "onlook-dev/onlook",
+  "p_agent_ge_human_repo_mean": 0.0,
+  "p_agent_ge_human_repo_mean_excluding_outlier": 0.5128
+}

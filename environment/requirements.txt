@@ -1,0 +1,2 @@
+# No third-party Python packages are required for the bundled helper scripts.
+# Standard library only.

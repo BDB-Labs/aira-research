@@ -1,0 +1,3 @@
+arm,scanned_files,high_total,medium_total,low_total,high_per_file,medium_per_file,low_per_file
+agent_attributed_strict_subset,300,80,148,24,0.267,0.493,0.08
+human_control,300,61,195,23,0.203,0.65,0.077
