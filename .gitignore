@@ -2,8 +2,13 @@
 __pycache__/
 *.pyc
 *.pyo
-*.log
 .venv/
 
-# Local run outputs should stay in the AIRA workspace, not this repo.
-data/
+*.aux
+*.log
+*.out
+*.xdv
+*.toc
+*.fdb_latexmk
+*.fls
+*.synctex.gz

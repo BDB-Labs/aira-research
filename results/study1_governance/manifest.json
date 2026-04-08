@@ -1,0 +1,45 @@
+{
+  "generated_at": "2026-03-29T08:38:54.217622-07:00",
+  "export_dir": "/Users/billp/Documents/AIRA/research_exports/v8_2026-03-29",
+  "source_files": {
+    "static_targeted": "/tmp/v8-aira-targeted.json",
+    "single_file_comparison": "/tmp/v8-minimax-single-file-comparison.json",
+    "llm_repo": "/tmp/v8-llm-minimax.json",
+    "llm_runtime": "/tmp/v8-engine-runtime-llm-minimax.json",
+    "llm_api": "/tmp/v8-api-llm-minimax.json"
+  },
+  "artifacts": [
+    {
+      "path": "/Users/billp/Documents/AIRA/research_exports/v8_2026-03-29/v8_static_targeted_findings.csv",
+      "description": "Full deterministic targeted AIRA findings for V8, one row per finding."
+    },
+    {
+      "path": "/Users/billp/Documents/AIRA/research_exports/v8_2026-03-29/v8_static_targeted_per_check.csv",
+      "description": "Deterministic targeted AIRA counts aggregated by AIRA check."
+    },
+    {
+      "path": "/Users/billp/Documents/AIRA/research_exports/v8_2026-03-29/v8_static_targeted_per_target.csv",
+      "description": "Deterministic targeted AIRA summary by scanned top-level V8 target."
+    },
+    {
+      "path": "/Users/billp/Documents/AIRA/research_exports/v8_2026-03-29/v8_static_targeted_top_files.csv",
+      "description": "Deterministic targeted AIRA findings aggregated by file, sorted by total findings."
+    },
+    {
+      "path": "/Users/billp/Documents/AIRA/research_exports/v8_2026-03-29/v8_single_file_static_vs_llm_summary.csv",
+      "description": "Single-file static vs minimax-m2:cloud comparison summary for three V8 hotspot files."
+    },
+    {
+      "path": "/Users/billp/Documents/AIRA/research_exports/v8_2026-03-29/v8_single_file_static_vs_llm_check_matrix.csv",
+      "description": "Single-file static vs minimax-m2:cloud AIRA check-status matrix."
+    },
+    {
+      "path": "/Users/billp/Documents/AIRA/research_exports/v8_2026-03-29/v8_single_file_static_vs_llm_findings.csv",
+      "description": "Single-file static and minimax-m2:cloud findings, one row per finding."
+    },
+    {
+      "path": "/Users/billp/Documents/AIRA/research_exports/v8_2026-03-29/v8_ollama_minimax_slice_summary.csv",
+      "description": "Repo, runtime, and API minimax-m2:cloud Ollama slice summaries."
+    }
+  ]
+}
