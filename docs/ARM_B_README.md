@@ -9,6 +9,7 @@ The extractor is now quota-shaped, resumable, and fail-closed:
 - collection schedule: round-robin across search languages
 - resume: exact queue / page / repo-cursor state in `state.json`
 - failure semantics: network / DNS / API failures checkpoint and stop; they do not masquerade as "no more repos"
+- persistence: append-only accepted log plus checkpointed derived index
 - provenance: every accepted file keeps repo / PR / file / patch identity and reconstructed content
 
 ## Prerequisites
@@ -21,6 +22,9 @@ export GITHUB_TOKEN=your_fine_grained_token
 `GH_TOKEN` also works. If neither env var is set, the extractor falls back to
 `gh auth token`.
 
+For unattended runs, set `GITHUB_TOKEN` or `GH_TOKEN` explicitly. The `gh`
+fallback only works if the GitHub CLI is installed and authenticated.
+
 ## Files
 
 ### `scripts/arm_b_extract.py`
@@ -29,6 +33,7 @@ Builds the oversized human candidate pool.
 
 Outputs under `data/arm_b` by default:
 
+- `accepted_log.jsonl`
 - `index.jsonl`
 - `patches/<patch_sha>.patch`
 - `excluded.jsonl`
@@ -38,7 +43,9 @@ Outputs under `data/arm_b` by default:
 
 ### `scripts/arm_b_match.py`
 
-Takes the pool and draws the final Arm B sample aligned to Arm A.
+Takes the pool and draws the final Arm B sample aligned to Arm A with strict
+language equality, strict size-band equality, Arm A size-decile mirroring,
+same-repo preference, nearest line-count tie-breaking, and a final repo cap.
 
 ### `docs/ARM_B_README.md`
 
@@ -72,6 +79,7 @@ Notes:
 - If you want the pool size derived from Arm A instead, set `--target 0` and use `--oversample-factor`.
 - `--fresh` clears prior extractor artifacts in the output directory.
 - `--resume` requires the same `arm_a`, `target`, `seed`, and `repo_cap` as the original run.
+- If older patch-only rows are present, resume will try to hydrate full file content from GitHub using the recorded `commit_sha`.
 
 ### Collection behavior
 
@@ -92,7 +100,7 @@ Arm B hard-excludes on either signal class:
 1. Commit-message keywords
 2. Repo-level AI config / workflow signals
 
-Repo-level screening uses a recursive Git tree scan first, then a smaller fallback probe only when the tree response is truncated.
+Repo-level screening uses a recursive Git tree scan first, then a smaller fallback probe only when the tree response is truncated. Workflow files are checked by filename and YAML contents.
 
 ### Failure semantics
 
@@ -117,7 +125,8 @@ python scripts/arm_b_match.py \
   --arm-a /Users/billp/Documents/AIRA/data/aidev_arm_a_staged_1000_sample.jsonl \
   --pool  /Users/billp/Documents/AIRA/data/arm_b/index.jsonl \
   --n     1000 \
-  --seed  42
+  --seed  42 \
+  --repo-cap 4
 ```
 
 Outputs:
@@ -142,6 +151,9 @@ The seed controls deterministic ordering of:
 - file order within each PR
 - final index rewrite ordering
 - match tie-breaks
+
+`accepted_log.jsonl` is the append-only accepted-record log. `index.jsonl` is the
+checkpointed derived manifest with refreshed `size_decile` values for matching.
 
 GitHub search results can still drift over time, so the seed gives deterministic
 selection from a fixed retrieved set, not a perfect historical replay of GitHub.
@@ -189,6 +201,9 @@ These control how often `summary.json` and `state.json` are refreshed.
 - `patch_sha`
 - `ai_excluded`
 - `exclusion_signal`
+
+`accepted_log.jsonl` carries the same accepted-record schema before checkpoint-time
+decile rewrite.
 
 `excluded.jsonl` records include:
 

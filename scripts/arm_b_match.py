@@ -1,27 +1,20 @@
 """
 arm_b_match.py
 --------------
-Takes the Arm B candidate pool produced by arm_b_extract.py and draws
-a final matched sample aligned to Arm A on:
+Draw a final Arm B sample from the Arm B candidate pool produced by
+arm_b_extract.py.
 
-  - Language distribution
-  - File-size decile distribution within each language
-  - Per-repo cap (enforced again at draw time: max REPO_CAP files/repo)
+Matching invariants:
 
-Produces:
-  data/arm_b/matched_sample.jsonl   — final Arm B draw
-  data/arm_b/match_report.json      — balance diagnostics for the paper
-
-Usage
------
-    python arm_b_match.py --arm-a data/arm_a/index.jsonl \
-                          --pool  data/arm_b/index.jsonl  \
-                          --n     1000
-
-Requirements
-------------
-    pip install scipy   (for KS test in balance report)
+- language equality
+- size-band equality
+- Arm A size-decile distribution mirrored deterministically
+- same-repo controls preferred when available
+- nearest line-count match within the valid cell
+- strict final repo cap
 """
+
+from __future__ import annotations
 
 import argparse
 import hashlib
@@ -32,8 +25,8 @@ from typing import Any
 
 
 LANGUAGES = ["JavaScript", "Python", "TypeScript"]
-REPO_CAP = 8
-OUTPUT_DIR = Path("data/arm_b")
+SIZE_BANDS = ("100_299", "300_999", "1000_plus")
+DEFAULT_FINAL_REPO_CAP = 4
 
 
 def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -53,13 +46,13 @@ def write_jsonl(records: list[dict[str, Any]], path: Path) -> None:
             fh.write(json.dumps(record, sort_keys=True) + "\n")
 
 
-def size_value(record: dict[str, Any]) -> int:
-    for key in ("patch_lines", "file_line_count"):
-        value = record.get(key)
-        if value is not None:
-            return int(value)
-    content = str(record.get("content") or "")
-    return content.count("\n") + 1 if content else 0
+def record_key(seed: int, record: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        (
+            f"{seed}|{repo_name(record)}|{pr_identifier(record)}|"
+            f"{file_path(record)}|{record.get('patch_sha', '')}"
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def repo_name(record: dict[str, Any]) -> str:
@@ -84,39 +77,61 @@ def patch_identity(record: dict[str, Any]) -> tuple[str, str, str]:
     return (repo_name(record), pr_identifier(record), file_path(record))
 
 
-def stable_key(seed: int, record: dict[str, Any]) -> str:
-    return hashlib.sha256(
-        f"{seed}|{repo_name(record)}|{pr_identifier(record)}|{file_path(record)}|{record.get('patch_sha','')}".encode(
-            "utf-8"
-        )
-    ).hexdigest()
+def size_value(record: dict[str, Any]) -> int:
+    for key in ("file_line_count", "patch_lines"):
+        value = record.get(key)
+        if value not in (None, ""):
+            return int(value)
+    content = str(record.get("content") or "")
+    return content.count("\n") + 1 if content else 0
+
+
+def size_band(record: dict[str, Any]) -> str:
+    band = str(record.get("size_band") or "").strip()
+    if band in SIZE_BANDS:
+        return band
+    lines = size_value(record)
+    if 100 <= lines <= 299:
+        return "100_299"
+    if 300 <= lines <= 999:
+        return "300_999"
+    if lines >= 1000:
+        return "1000_plus"
+    return "unknown"
 
 
 def assign_deciles(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_lang: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
-        language = record.get("language")
+        language = str(record.get("language") or "")
         if language in LANGUAGES:
-            by_lang[language].append(dict(record))
+            enriched = dict(record)
+            enriched["file_line_count"] = size_value(enriched)
+            enriched["size_band"] = size_band(enriched)
+            by_lang[language].append(enriched)
 
     out: list[dict[str, Any]] = []
     for language in LANGUAGES:
-        group = by_lang.get(language, [])
+        group = [record for record in by_lang.get(language, []) if record["size_band"] in SIZE_BANDS]
         if not group:
             continue
         sorted_group = sorted(
             group,
-            key=lambda record: (size_value(record), repo_name(record), pr_identifier(record), file_path(record)),
+            key=lambda record: (
+                record["file_line_count"],
+                repo_name(record),
+                pr_identifier(record),
+                file_path(record),
+            ),
         )
         n = len(sorted_group)
         for index, record in enumerate(sorted_group):
-            record["patch_lines"] = size_value(record)
             record["size_decile"] = min(9, int((index / max(n - 1, 1)) * 10))
             out.append(record)
     return out
 
 
-def dedupe_pool(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+def dedupe_records(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
     seen: set[tuple[str, str, str]] = set()
     deduped: list[dict[str, Any]] = []
     duplicates_removed = 0
@@ -130,33 +145,57 @@ def dedupe_pool(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], in
     return deduped, duplicates_removed
 
 
-def arm_a_cell_distribution(records: list[dict[str, Any]]) -> Counter[tuple[str, int]]:
-    dist: Counter[tuple[str, int]] = Counter()
+def arm_a_cell_distribution(records: list[dict[str, Any]]) -> Counter[tuple[str, str, int]]:
+    dist: Counter[tuple[str, str, int]] = Counter()
     for record in records:
-        language = record.get("language")
+        language = str(record.get("language") or "")
+        band = str(record.get("size_band") or "")
         decile = int(record.get("size_decile", 0))
-        if language in LANGUAGES:
-            dist[(language, decile)] += 1
+        if language in LANGUAGES and band in SIZE_BANDS:
+            dist[(language, band, decile)] += 1
     return dist
 
 
-def scale_cell_targets(cell_counts: Counter[tuple[str, int]], target_total: int) -> Counter[tuple[str, int]]:
+def scale_cell_targets(
+    cell_counts: Counter[tuple[str, str, int]],
+    target_total: int,
+) -> Counter[tuple[str, str, int]]:
     total = sum(cell_counts.values())
     if total <= 0:
         return Counter()
-    exact: dict[tuple[str, int], float] = {
+    exact: dict[tuple[str, str, int], float] = {
         key: (count / total) * target_total for key, count in cell_counts.items()
     }
     scaled = Counter({key: int(value) for key, value in exact.items()})
     remainder = target_total - sum(scaled.values())
     remainders = sorted(
         cell_counts.keys(),
-        key=lambda key: (exact[key] - scaled[key], key[0], key[1]),
+        key=lambda key: (exact[key] - scaled[key], key[0], key[1], key[2]),
         reverse=True,
     )
     for key in remainders[:remainder]:
         scaled[key] += 1
     return scaled
+
+
+def select_arm_a_anchors(
+    arm_a: list[dict[str, Any]],
+    *,
+    cell_targets: Counter[tuple[str, str, int]],
+    seed: int,
+) -> list[dict[str, Any]]:
+    by_cell: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
+    for record in arm_a:
+        cell = (record["language"], record["size_band"], int(record["size_decile"]))
+        by_cell[cell].append(record)
+
+    anchors: list[dict[str, Any]] = []
+    for cell, target in sorted(cell_targets.items()):
+        if target <= 0:
+            continue
+        ordered = sorted(by_cell.get(cell, []), key=lambda record: record_key(seed, record))
+        anchors.extend(ordered[:target])
+    return sorted(anchors, key=lambda record: record_key(seed, record))
 
 
 def median(values: list[int]) -> float:
@@ -174,125 +213,138 @@ def matched_draw(
     arm_a: list[dict[str, Any]],
     n_total: int,
     seed: int,
+    repo_cap: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    arm_a, arm_a_duplicates_removed = dedupe_records(arm_a)
+    pool, pool_duplicates_removed = dedupe_records(pool)
     arm_a = assign_deciles(arm_a)
     pool = assign_deciles(pool)
-    pool, duplicates_removed = dedupe_pool(pool)
 
     cell_targets = scale_cell_targets(arm_a_cell_distribution(arm_a), n_total)
-    language_targets = Counter()
-    for (language, _decile), count in cell_targets.items():
-        language_targets[language] += count
+    anchors = select_arm_a_anchors(arm_a, cell_targets=cell_targets, seed=seed)
 
-    pool_index: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
-    all_by_language: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    pool_index: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
     for record in pool:
-        key = (record["language"], int(record["size_decile"]))
-        pool_index[key].append(record)
-        all_by_language[record["language"]].append(record)
-
-    for key, records in pool_index.items():
-        pool_index[key] = sorted(records, key=lambda record: stable_key(seed, record))
-    for language, records in all_by_language.items():
-        all_by_language[language] = sorted(records, key=lambda record: stable_key(seed, record))
+        cell = (record["language"], record["size_band"], int(record["size_decile"]))
+        pool_index[cell].append(record)
 
     selected: list[dict[str, Any]] = []
     selected_ids: set[tuple[str, str, str]] = set()
     repo_tally: Counter[str] = Counter()
-    repo_cap_rejections = 0
-    unmatched_by_cell: Counter[str] = Counter()
-    filled_by_language_only: Counter[str] = Counter()
+    shortfalls_by_cell: Counter[str] = Counter()
+    repo_cap_blocked_candidates = 0
+    same_repo_matches = 0
 
-    def try_take(record: dict[str, Any]) -> bool:
-        nonlocal repo_cap_rejections
-        identity = patch_identity(record)
-        repo = repo_name(record)
-        if identity in selected_ids:
-            return False
-        if repo and repo_tally[repo] >= REPO_CAP:
-            repo_cap_rejections += 1
-            return False
-        selected.append(record)
-        selected_ids.add(identity)
-        if repo:
-            repo_tally[repo] += 1
-        return True
+    for anchor in anchors:
+        cell = (anchor["language"], anchor["size_band"], int(anchor["size_decile"]))
+        anchor_repo = repo_name(anchor)
+        anchor_size = size_value(anchor)
+        eligible: list[dict[str, Any]] = []
+        same_repo_eligible: list[dict[str, Any]] = []
 
-    for language in LANGUAGES:
-        for decile in range(10):
-            target = cell_targets.get((language, decile), 0)
-            if target <= 0:
+        for candidate in pool_index.get(cell, []):
+            identity = patch_identity(candidate)
+            repo = repo_name(candidate)
+            if identity in selected_ids:
                 continue
-            taken = 0
-            for record in pool_index.get((language, decile), []):
-                if try_take(record):
-                    taken += 1
-                    if taken >= target:
-                        break
-            if taken < target:
-                unmatched_by_cell[f"{language}:{decile}"] += target - taken
+            if repo and repo_tally[repo] >= repo_cap:
+                repo_cap_blocked_candidates += 1
+                continue
+            eligible.append(candidate)
+            if repo and repo == anchor_repo:
+                same_repo_eligible.append(candidate)
 
-    for language in LANGUAGES:
-        needed = language_targets.get(language, 0) - sum(1 for record in selected if record["language"] == language)
-        if needed <= 0:
+        search_space = same_repo_eligible or eligible
+        if not search_space:
+            shortfalls_by_cell[f"{cell[0]}:{cell[1]}:{cell[2]}"] += 1
             continue
-        for record in all_by_language.get(language, []):
-            if try_take(record):
-                filled_by_language_only[language] += 1
-                needed -= 1
-                if needed <= 0:
-                    break
 
-    if len(selected) < n_total:
-        all_remaining = sorted(pool, key=lambda record: stable_key(seed, record))
-        for record in all_remaining:
-            if try_take(record) and len(selected) >= n_total:
-                break
+        best = min(
+            search_space,
+            key=lambda candidate: (
+                abs(size_value(candidate) - anchor_size),
+                record_key(seed, candidate),
+            ),
+        )
+        if repo_name(best) == anchor_repo:
+            same_repo_matches += 1
+        selected.append(best)
+        selected_ids.add(patch_identity(best))
+        if repo_name(best):
+            repo_tally[repo_name(best)] += 1
 
-    selected = sorted(selected, key=lambda record: stable_key(seed, record))
+    selected = sorted(selected, key=lambda record: record_key(seed, record))
 
+    selected_cell_counts = Counter(
+        (record["language"], record["size_band"], int(record["size_decile"])) for record in selected
+    )
+    arm_a_sizes_by_language = {
+        language: [size_value(record) for record in anchors if record.get("language") == language]
+        for language in LANGUAGES
+    }
+    arm_b_sizes_by_language = {
+        language: [size_value(record) for record in selected if record.get("language") == language]
+        for language in LANGUAGES
+    }
     diagnostics: dict[str, Any] = {
         "seed": seed,
         "target_total": n_total,
         "total_selected": len(selected),
-        "pool_records_in": len(pool) + duplicates_removed,
+        "arm_a_input_records": len(arm_a),
+        "arm_a_duplicates_removed": arm_a_duplicates_removed,
         "pool_records_after_dedupe": len(pool),
-        "duplicates_removed": duplicates_removed,
-        "repo_cap": REPO_CAP,
-        "repo_cap_rejections": repo_cap_rejections,
-        "language_targets": dict(sorted(language_targets.items())),
+        "pool_duplicates_removed": pool_duplicates_removed,
+        "repo_cap": repo_cap,
+        "same_repo_matches": same_repo_matches,
+        "repo_cap_blocked_candidates": repo_cap_blocked_candidates,
+        "shortfall_total": sum(shortfalls_by_cell.values()),
+        "shortfalls_by_cell": dict(sorted(shortfalls_by_cell.items())),
+        "target_cell_counts": {
+            f"{language}:{band}:{decile}": count
+            for (language, band, decile), count in sorted(cell_targets.items())
+        },
+        "selected_cell_counts": {
+            f"{language}:{band}:{decile}": count
+            for (language, band, decile), count in sorted(selected_cell_counts.items())
+        },
         "language_counts": dict(sorted(Counter(record["language"] for record in selected).items())),
-        "unmatched_by_cell": dict(sorted(unmatched_by_cell.items())),
-        "filled_by_language_only": dict(sorted(filled_by_language_only.items())),
+        "size_band_counts": {
+            language: dict(
+                sorted(
+                    Counter(
+                        record["size_band"] for record in selected if record.get("language") == language
+                    ).items()
+                )
+            )
+            for language in LANGUAGES
+        },
         "repos_used": len(repo_tally),
         "max_files_per_repo": max(repo_tally.values(), default=0),
-        "decile_balance": {},
+        "line_balance": {},
     }
 
     for language in LANGUAGES:
-        arm_a_sizes = [size_value(record) for record in arm_a if record.get("language") == language]
-        arm_b_sizes = [size_value(record) for record in selected if record.get("language") == language]
-        diagnostics["decile_balance"][language] = {
-            "arm_a_n": len(arm_a_sizes),
-            "arm_b_n": len(arm_b_sizes),
-            "arm_a_median": median(arm_a_sizes),
-            "arm_b_median": median(arm_b_sizes),
+        diagnostics["line_balance"][language] = {
+            "arm_a_n": len(arm_a_sizes_by_language[language]),
+            "arm_b_n": len(arm_b_sizes_by_language[language]),
+            "arm_a_median": median(arm_a_sizes_by_language[language]),
+            "arm_b_median": median(arm_b_sizes_by_language[language]),
         }
 
     try:
         from scipy.stats import ks_2samp
 
         for language in LANGUAGES:
-            arm_a_sizes = [size_value(record) for record in arm_a if record.get("language") == language]
-            arm_b_sizes = [size_value(record) for record in selected if record.get("language") == language]
+            arm_a_sizes = arm_a_sizes_by_language[language]
+            arm_b_sizes = arm_b_sizes_by_language[language]
             if arm_a_sizes and arm_b_sizes:
                 stat, pvalue = ks_2samp(arm_a_sizes, arm_b_sizes)
-                diagnostics["decile_balance"][language]["ks_stat"] = round(float(stat), 4)
-                diagnostics["decile_balance"][language]["ks_pvalue"] = round(float(pvalue), 4)
+                diagnostics["line_balance"][language]["ks_stat"] = round(float(stat), 4)
+                diagnostics["line_balance"][language]["ks_pvalue"] = round(float(pvalue), 4)
     except ImportError:
         diagnostics["ks_test"] = "scipy not installed — skipped"
 
-    return selected[:n_total], diagnostics
+    return selected, diagnostics
 
 
 def main() -> None:
@@ -300,7 +352,8 @@ def main() -> None:
     parser.add_argument("--arm-a", default="data/arm_a/index.jsonl", help="Arm A index JSONL")
     parser.add_argument("--pool", default="data/arm_b/index.jsonl", help="Arm B candidate pool JSONL")
     parser.add_argument("--n", type=int, default=1_000, help="Number of files to draw")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--seed", type=int, default=42, help="Deterministic seed")
+    parser.add_argument("--repo-cap", type=int, default=DEFAULT_FINAL_REPO_CAP, help="Final per-repo cap")
     parser.add_argument("--out", default="data/arm_b/matched_sample.jsonl")
     args = parser.parse_args()
 
@@ -312,30 +365,17 @@ def main() -> None:
     pool = load_jsonl(args.pool)
     print(f"  {len(pool)} records")
 
-    print(f"Drawing matched sample (n={args.n}, seed={args.seed})...")
-    selected, diagnostics = matched_draw(pool, arm_a, args.n, args.seed)
+    print(f"Drawing matched sample (n={args.n}, seed={args.seed}, repo_cap={args.repo_cap})...")
+    selected, diagnostics = matched_draw(pool, arm_a, args.n, args.seed, args.repo_cap)
 
     out_path = Path(args.out)
     report_path = out_path.parent / "match_report.json"
     write_jsonl(selected, out_path)
-    report_path.write_text(json.dumps(diagnostics, indent=2, sort_keys=True), encoding="utf-8")
+    report_path.write_text(json.dumps(diagnostics, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    print("\n── Match complete ──")
-    print(f"  Selected          : {diagnostics['total_selected']} files")
-    print(f"  Repos used        : {diagnostics['repos_used']}")
-    print(f"  Max files/repo    : {diagnostics['max_files_per_repo']}")
-    print(f"  Repo-cap rejections: {diagnostics['repo_cap_rejections']}")
-    print("  Language counts:")
-    for language, count in diagnostics["language_counts"].items():
-        print(f"    {language:12s}: {count}")
-    print("  Size balance:")
-    for language, stats in diagnostics["decile_balance"].items():
-        ks = f"  KS p={stats.get('ks_pvalue', 'n/a')}" if "ks_pvalue" in stats else ""
-        print(
-            f"    {language:12s}: Arm A median={stats['arm_a_median']:.0f}  Arm B median={stats['arm_b_median']:.0f}{ks}"
-        )
-    print(f"  Output            : {out_path}")
-    print(f"  Report            : {report_path}")
+    print(f"Wrote matched sample: {out_path} ({len(selected)} files)")
+    print(f"Wrote match report:  {report_path}")
+    print(json.dumps(diagnostics, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
