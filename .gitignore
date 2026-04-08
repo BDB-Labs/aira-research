@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.venv/
+
+# Local run outputs should stay in the AIRA workspace, not this repo.
+data/
