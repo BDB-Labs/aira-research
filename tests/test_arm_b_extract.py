@@ -230,6 +230,17 @@ class ArmBExtractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(extractor.records[0]["file_line_count"], 140)
         self.assertEqual(extractor.records[0]["size_band"], "100_299")
 
+    async def test_github_client_treats_pull_endpoint_404_as_empty(self) -> None:
+        client = arm_b_extract.GitHubClient("token")
+
+        async def fake_get_json(_url, **_kwargs):
+            return None
+
+        client._get_json = fake_get_json
+        self.assertEqual(await client.list_closed_prs("owner/repo", 1), [])
+        self.assertEqual(await client.get_pr_commits("owner/repo", 1), [])
+        self.assertEqual(await client.get_pr_files("owner/repo", 1), [])
+
 
 if __name__ == "__main__":
     unittest.main()

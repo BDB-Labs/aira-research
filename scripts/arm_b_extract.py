@@ -740,6 +740,7 @@ class GitHubClient:
                 "per_page": 100,
                 "page": page,
             },
+            allow_404=True,
         )
         return list(payload or [])
 
@@ -747,6 +748,7 @@ class GitHubClient:
         payload = await self._get_json(
             f"{self.BASE}/repos/{repo}/pulls/{pr_number}/commits",
             params={"per_page": 100},
+            allow_404=True,
         )
         return list(payload or [])
 
@@ -754,6 +756,7 @@ class GitHubClient:
         payload = await self._get_json(
             f"{self.BASE}/repos/{repo}/pulls/{pr_number}/files",
             params={"per_page": 100},
+            allow_404=True,
         )
         return list(payload or [])
 
