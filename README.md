@@ -8,6 +8,7 @@ This repository packages the study as a reusable artifact:
 - redacted manifests and dataset metadata
 - conceptual figures
 - reproducibility notes and helper scripts
+- hardened corpus-build tooling for the next Arm B expansion
 
 The scanner itself is maintained separately:
 - [BDB-Labs/aira-scanner](https://github.com/BDB-Labs/aira-scanner)
@@ -22,6 +23,7 @@ The paper makes empirical claims about a specific class of AI-assisted coding fa
 - the aggregate outputs behind the manuscript
 - the provenance and composition of the rebuilt pilot
 - the exact scanner version used
+- the corpus-build tooling now being used to prepare the larger Arm B and 3,000-case study shape
 
 ## Quick Links
 
@@ -33,6 +35,8 @@ The paper makes empirical claims about a specific class of AI-assisted coding fa
 - Methodology note: [docs/methodology.md](docs/methodology.md)
 - Reproducibility note: [docs/reproducibility.md](docs/reproducibility.md)
 - Zenodo checklist: [docs/zenodo_release_checklist.md](docs/zenodo_release_checklist.md)
+- Arm B build README: [docs/ARM_B_README.md](docs/ARM_B_README.md)
+- 3,000-case protocol: [docs/CORPUS_3000_PROTOCOL.md](docs/CORPUS_3000_PROTOCOL.md)
 
 ## Release Snapshot
 
@@ -46,6 +50,27 @@ The paper makes empirical claims about a specific class of AI-assisted coding fa
 - overall high-severity rate: `0.267` vs `0.203` HIGH/file
 - strongest stable support: JavaScript (`0.54` vs `0.17`)
 - strongest check-level support: `exception_handling` (`61` vs `43`)
+
+## Ongoing Corpus Build
+
+This repo now also tracks the hardened Arm B collection and matching pipeline used for the next corpus build:
+
+- [scripts/arm_b_extract.py](scripts/arm_b_extract.py)
+- [scripts/arm_b_match.py](scripts/arm_b_match.py)
+- [tests/test_arm_b_extract.py](tests/test_arm_b_extract.py)
+- [tests/test_arm_b_match.py](tests/test_arm_b_match.py)
+
+The extractor and matcher currently default to the live AIRA workspace for data inputs and outputs:
+
+- Arm A input: `/Users/billp/Documents/AIRA/data/aidev_arm_a_staged_1000_sample.jsonl`
+- Arm B output: `/Users/billp/Documents/AIRA/data/arm_b`
+
+Typical usage from this repo root:
+
+```bash
+python scripts/arm_b_extract.py --target 1500 --seed 42 --resume
+python scripts/arm_b_match.py --arm-a /Users/billp/Documents/AIRA/data/aidev_arm_a_staged_1000_sample.jsonl --pool /Users/billp/Documents/AIRA/data/arm_b/index.jsonl --n 1000 --seed 42 --repo-cap 4
+```
 
 ## Concept Figures
 
@@ -67,9 +92,11 @@ bash scripts/build_figures.sh
 - [data/](data/)
   Redacted manifests and metadata for the released evidence snapshot.
 - [docs/](docs/)
-  Methodology, reproducibility, provenance, limitations, and release guidance.
+  Methodology, reproducibility, provenance, limitations, release guidance, and ongoing corpus-build documentation.
 - [scripts/](scripts/)
-  Small helper scripts for rebuilding summaries, figures, and the arXiv bundle.
+  Helper scripts for rebuilding summaries, figures, the arXiv bundle, and the Arm B corpus build.
+- [tests/](tests/)
+  Regression coverage for the hardened Arm B extractor and matcher.
 
 ## What Is Not Included
 
