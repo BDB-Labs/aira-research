@@ -1,3 +1,0 @@
-Repository: https://github.com/BDB-Labs/aira-scanner
-Pinned commit: fe4efc987c3934dea47aeb192a8a1b3b38a19084
-Role: canonical scanner/tool implementation for this research artifact release
