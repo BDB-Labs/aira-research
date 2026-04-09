@@ -716,6 +716,8 @@ class GitHubClient:
         )
         if payload is None:
             return None
+        if isinstance(payload, list):
+            return None
         encoding = str(payload.get("encoding") or "").lower()
         content = payload.get("content")
         if encoding == "base64" and content:

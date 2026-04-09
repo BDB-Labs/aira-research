@@ -241,6 +241,15 @@ class ArmBExtractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await client.get_pr_commits("owner/repo", 1), [])
         self.assertEqual(await client.get_pr_files("owner/repo", 1), [])
 
+    async def test_github_client_treats_directory_payload_as_no_file_text(self) -> None:
+        client = arm_b_extract.GitHubClient("token")
+
+        async def fake_get_json(_url, **_kwargs):
+            return []
+
+        client._get_json = fake_get_json
+        self.assertIsNone(await client.get_file_text("owner/repo", ".github/workflows/tests", ref="main"))
+
 
 if __name__ == "__main__":
     unittest.main()
