@@ -21,8 +21,8 @@ def make_content(lines: int) -> str:
     return "\n".join(f"line {index}" for index in range(lines))
 
 
-def make_patch(lines: int) -> str:
-    body = "\n".join(f"+line {index}" for index in range(lines))
+def make_patch(lines: int, *, prefix: str = "line") -> str:
+    body = "\n".join(f"+{prefix} {index}" for index in range(lines))
     return f"@@\n{body}\n"
 
 
@@ -37,13 +37,35 @@ def write_arm_a(path: Path, *, lines: int = 140) -> None:
     path.write_text(json.dumps(record) + "\n", encoding="utf-8")
 
 
-def build_args(arm_a_path: Path, output_dir: Path, *, target: int = 2, resume: bool = False) -> argparse.Namespace:
+def write_arm_a_series(path: Path, lines_by_record: list[int], *, language: str = "JavaScript") -> None:
+    rows = []
+    for index, lines in enumerate(lines_by_record, 1):
+        rows.append(
+            {
+                "repo_name": "arm-a/repo",
+                "pr_identifier": str(index),
+                "path": f"src/anchor-{index}.js",
+                "language": language,
+                "content": make_content(lines),
+            }
+        )
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+
+def build_args(
+    arm_a_path: Path,
+    output_dir: Path,
+    *,
+    target: int = 2,
+    resume: bool = False,
+    repo_cap: int = 8,
+) -> argparse.Namespace:
     return argparse.Namespace(
         arm_a=str(arm_a_path),
         output_dir=str(output_dir),
         target=target,
         oversample_factor=2.0,
-        repo_cap=8,
+        repo_cap=repo_cap,
         seed=42,
         resume=resume,
         fresh=False,
@@ -156,8 +178,8 @@ class ArmBExtractTests(unittest.IsolatedAsyncioTestCase):
             2: [],
         }
         files_by_pr = {
-            101: [{"filename": "src/one.js", "status": "modified", "patch": make_patch(140), "sha": "sha-101"}],
-            102: [{"filename": "src/two.js", "status": "modified", "patch": make_patch(145), "sha": "sha-102"}],
+            101: [{"filename": "src/one.js", "status": "modified", "patch": make_patch(140, prefix="one"), "sha": "sha-101"}],
+            102: [{"filename": "src/two.js", "status": "modified", "patch": make_patch(140, prefix="two"), "sha": "sha-102"}],
         }
         client = FakeClient(prs_by_page, files_by_pr)
 
@@ -173,8 +195,17 @@ class ArmBExtractTests(unittest.IsolatedAsyncioTestCase):
         accepted_first = await extractor.process_repo_turn(client, repo, "javascript", 1)
         self.assertEqual(accepted_first, 1)
         self.assertEqual(len(extractor.records), 1)
-        self.assertEqual(extractor.repo_cursors[repo]["pr_page"], 1)
-        self.assertEqual(extractor.repo_cursors[repo]["pr_index"], 1)
+        first_pr_number = extractor.records[0]["pr_number"]
+        ordered_prs = sorted(
+            prs_by_page[1],
+            key=lambda item: arm_b_extract.stable_key(args.seed, repo, item.get("number", 0)),
+        )
+        if first_pr_number == ordered_prs[-1]["number"]:
+            self.assertEqual(extractor.repo_cursors[repo]["pr_page"], 2)
+            self.assertEqual(extractor.repo_cursors[repo]["pr_index"], 0)
+        else:
+            self.assertEqual(extractor.repo_cursors[repo]["pr_page"], 1)
+            self.assertEqual(extractor.repo_cursors[repo]["pr_index"], 1)
 
         accepted_second = await extractor.process_repo_turn(client, repo, "javascript", 1)
         self.assertEqual(accepted_second, 1)
@@ -183,6 +214,56 @@ class ArmBExtractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(extractor.repo_cursors[repo]["pr_index"], 0)
         self.assertIn((repo, "101"), extractor.completed_prs)
         self.assertIn((repo, "102"), extractor.completed_prs)
+
+    async def test_arm_a_target_decile_mapping_tracks_arm_a_quantiles(self) -> None:
+        arm_a_path = self.root / "arm_a_deciles.jsonl"
+        write_arm_a_series(arm_a_path, [100 + (index * 10) for index in range(10)])
+        output_dir = self.root / "decile_arm_b"
+        args = build_args(arm_a_path, output_dir, target=10)
+        extractor = arm_b_extract.ArmBExtractor(args)
+
+        self.assertEqual(extractor.arm_a_target_decile_for("javascript", 100), 0)
+        self.assertEqual(extractor.arm_a_target_decile_for("javascript", 145), 5)
+        self.assertEqual(extractor.arm_a_target_decile_for("javascript", 190), 9)
+
+    async def test_validate_resume_configuration_allows_tighter_repo_cap(self) -> None:
+        output_dir = self.root / "resume_cap_arm_b"
+        args = build_args(self.arm_a_path, output_dir, target=2, repo_cap=4)
+        extractor = arm_b_extract.ArmBExtractor(args)
+
+        extractor.validate_resume_configuration(
+            {
+                "arm_a_path": str(extractor.arm_a_path),
+                "target_total": extractor.target_total,
+                "seed": extractor.args.seed,
+                "repo_cap": 8,
+            }
+        )
+
+    async def test_existing_record_counts_against_strict_target_cell(self) -> None:
+        arm_a_path = self.root / "arm_a_strict_resume.jsonl"
+        write_arm_a_series(arm_a_path, [100 + (index * 10) for index in range(10)])
+        output_dir = self.root / "strict_resume_arm_b"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        row = {
+            "repo": "owner/repo",
+            "pr_number": 10,
+            "file_path": "src/existing.js",
+            "language": "JavaScript",
+            "content": make_content(145),
+            "patch_sha": "existingpatch",
+            "patch_lines": 145,
+        }
+        (output_dir / "index.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+        args = build_args(arm_a_path, output_dir, target=10, resume=True)
+        extractor = arm_b_extract.ArmBExtractor(args)
+        extractor.ensure_output_dir()
+        extractor.load_resume_artifacts()
+
+        self.assertEqual(len(extractor.records), 1)
+        self.assertEqual(extractor.records[0]["arm_a_target_decile"], 5)
+        self.assertEqual(extractor.remaining_targets[("javascript", "100_299", 5)], 0)
 
     async def test_detect_repo_ai_signal_reads_workflow_contents(self) -> None:
         output_dir = self.root / "workflow_arm_b"

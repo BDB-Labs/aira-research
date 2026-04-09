@@ -4,7 +4,7 @@ arm_b_extract.py
 Build a resumable, quota-shaped Arm B (matched-human) candidate pool for AIRA.
 
 This extractor is intentionally stateful:
-- derives language + size-band quotas from Arm A
+- derives language + size-band + decile quotas from Arm A
 - collects against those quotas in staged round-robin turns
 - persists queue / page / repo cursor state for exact resume
 - fails closed on transport / DNS / API exhaustion instead of treating errors as empty search
@@ -55,7 +55,7 @@ from typing import Any, Optional
 import httpx
 
 
-STATE_VERSION = 3
+STATE_VERSION = 4
 
 SEARCH_LANGUAGES = ("javascript", "python", "typescript")
 DISPLAY_LANGUAGE = {
@@ -73,6 +73,7 @@ FILE_EXTENSIONS = {
     ".py": "python",
 }
 SIZE_BANDS = ("100_299", "300_999", "1000_plus")
+SIZE_DECILES = tuple(range(10))
 LANGUAGE_FAMILY = {
     "javascript": {"javascript", "typescript"},
     "typescript": {"javascript", "typescript"},
@@ -84,7 +85,7 @@ DEFAULT_OUTPUT_DIR = Path("/Users/billp/Documents/AIRA/data/arm_b")
 DEFAULT_TARGET = 1500
 DEFAULT_OVERSAMPLE_FACTOR = 2.0
 DEFAULT_SEED = 42
-DEFAULT_REPO_CAP = 8
+DEFAULT_REPO_CAP = 4
 DEFAULT_STAGE_ACCEPT_LIMIT = 25
 DEFAULT_REPO_PR_PAGE_BUDGET = 3
 DEFAULT_MAX_PR_PAGES_PER_REPO_TOTAL = 25
@@ -367,13 +368,69 @@ def filter_patch_candidate(filename: str, patch: str | None) -> tuple[str | None
     }
 
 
+def scale_counter_to_total(
+    observed: Counter[tuple[str, str, int]],
+    *,
+    observed_total: int,
+    scaled_total: int,
+) -> Counter[tuple[str, str, int]]:
+    exact = {
+        key: (count / observed_total) * scaled_total
+        for key, count in observed.items()
+    }
+    scaled = Counter({key: int(value) for key, value in exact.items()})
+    remainder = scaled_total - sum(scaled.values())
+    ordering = sorted(
+        observed.keys(),
+        key=lambda key: (exact[key] - scaled[key], key[0], key[1], key[2]),
+        reverse=True,
+    )
+    for key in ordering[:remainder]:
+        scaled[key] += 1
+    return scaled
+
+
+def decile_upper_bounds_by_language(
+    arm_a_records: list[dict[str, Any]],
+) -> dict[str, list[int]]:
+    bounds: dict[str, list[int]] = {}
+    for language in SEARCH_LANGUAGES:
+        display = display_language(language)
+        upper_bounds: list[int] = []
+        fallback = 0
+        for decile in SIZE_DECILES:
+            values = [
+                parse_int(record.get("file_line_count"))
+                for record in arm_a_records
+                if record.get("language") == display and parse_int(record.get("size_decile"), -1) == decile
+            ]
+            if values:
+                fallback = max(values)
+            upper_bounds.append(fallback)
+        bounds[language] = upper_bounds or [0] * len(SIZE_DECILES)
+    return bounds
+
+
+def target_decile_for_line_count(
+    language: str,
+    file_line_count: int,
+    *,
+    decile_upper_bounds: dict[str, list[int]],
+) -> int:
+    bounds = decile_upper_bounds.get(language) or [0] * len(SIZE_DECILES)
+    for decile, upper_bound in enumerate(bounds):
+        if file_line_count <= upper_bound:
+            return decile
+    return SIZE_DECILES[-1]
+
+
 def load_arm_a_distribution(
     *,
     arm_a_path: Path,
     target_total: int | None,
     oversample_factor: float,
-) -> tuple[Counter[tuple[str, str]], int, int]:
-    observed: Counter[tuple[str, str]] = Counter()
+) -> tuple[Counter[tuple[str, str, int]], int, int, dict[str, list[int]]]:
+    normalized_records: list[dict[str, Any]] = []
     arm_a_total = 0
     with arm_a_path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -389,7 +446,19 @@ def load_arm_a_distribution(
             band = file_size_band(lines)
             if band == "unknown":
                 continue
-            observed[(language, band)] += 1
+            normalized_records.append(
+                {
+                    "repo": str(record.get("repo") or record.get("repo_name") or ""),
+                    "repo_name": str(record.get("repo_name") or record.get("repo") or ""),
+                    "pr_number": parse_int(record.get("pr_number") or record.get("pr_identifier")),
+                    "pr_identifier": str(record.get("pr_identifier") or record.get("pr_number") or ""),
+                    "file_path": str(record.get("file_path") or record.get("path") or ""),
+                    "path": str(record.get("path") or record.get("file_path") or ""),
+                    "language": display_language(language),
+                    "file_line_count": lines,
+                    "size_band": band,
+                }
+            )
             arm_a_total += 1
 
     if arm_a_total <= 0:
@@ -400,54 +469,80 @@ def load_arm_a_distribution(
     else:
         scaled_total = int(target_total)
 
-    exact = {
-        key: (count / arm_a_total) * scaled_total
-        for key, count in observed.items()
-    }
-    scaled = Counter({key: int(value) for key, value in exact.items()})
-    remainder = scaled_total - sum(scaled.values())
-    ordering = sorted(
-        observed.keys(),
-        key=lambda key: (exact[key] - scaled[key], key[0], key[1]),
-        reverse=True,
+    enriched_arm_a = assign_size_deciles(normalized_records, seed=0)
+    observed: Counter[tuple[str, str, int]] = Counter()
+    for record in enriched_arm_a:
+        language = normalize_language(record.get("language"))
+        band = str(record.get("size_band") or "")
+        decile = parse_int(record.get("size_decile"), -1)
+        if language is None or band not in SIZE_BANDS or decile not in SIZE_DECILES:
+            continue
+        observed[(language, band, decile)] += 1
+
+    scaled = scale_counter_to_total(
+        observed,
+        observed_total=arm_a_total,
+        scaled_total=scaled_total,
     )
-    for key in ordering[:remainder]:
-        scaled[key] += 1
 
     for language in SEARCH_LANGUAGES:
         for band in SIZE_BANDS:
-            scaled.setdefault((language, band), 0)
+            for decile in SIZE_DECILES:
+                scaled.setdefault((language, band, decile), 0)
 
-    return scaled, arm_a_total, scaled_total
+    return scaled, arm_a_total, scaled_total, decile_upper_bounds_by_language(enriched_arm_a)
 
 
-def serialize_counter_by_cell(counter: Counter[tuple[str, str]]) -> dict[str, int]:
+def aggregate_counter_by_band(counter: Counter[tuple[str, str, int]]) -> Counter[tuple[str, str]]:
+    aggregated: Counter[tuple[str, str]] = Counter()
+    for (language, band, _decile), count in counter.items():
+        aggregated[(language, band)] += count
+    return aggregated
+
+
+def serialize_counter_by_band(counter: Counter[tuple[str, str, int]]) -> dict[str, int]:
+    aggregated = aggregate_counter_by_band(counter)
     return {
-        f"{language}:{band}": counter[(language, band)]
+        f"{language}:{band}": aggregated[(language, band)]
         for language in SEARCH_LANGUAGES
         for band in SIZE_BANDS
-        if counter.get((language, band), 0)
+        if aggregated.get((language, band), 0)
     }
 
 
-def deserialize_counter_by_cell(payload: dict[str, Any]) -> Counter[tuple[str, str]]:
-    counter: Counter[tuple[str, str]] = Counter()
+def serialize_counter_by_strict_cell(counter: Counter[tuple[str, str, int]]) -> dict[str, int]:
+    return {
+        f"{language}:{band}:{decile}": counter[(language, band, decile)]
+        for language in SEARCH_LANGUAGES
+        for band in SIZE_BANDS
+        for decile in SIZE_DECILES
+        if counter.get((language, band, decile), 0)
+    }
+
+
+def deserialize_counter_by_strict_cell(payload: dict[str, Any]) -> Counter[tuple[str, str, int]]:
+    counter: Counter[tuple[str, str, int]] = Counter()
     for key, value in payload.items():
         try:
-            language, band = key.split(":", 1)
+            language, band, decile_text = key.split(":", 2)
         except ValueError:
             continue
-        if language in SEARCH_LANGUAGES and band in SIZE_BANDS:
-            counter[(language, band)] = parse_int(value)
+        decile = parse_int(decile_text, -1)
+        if language in SEARCH_LANGUAGES and band in SIZE_BANDS and decile in SIZE_DECILES:
+            counter[(language, band, decile)] = parse_int(value)
     return counter
 
 
-def total_remaining(counter: Counter[tuple[str, str]]) -> int:
+def total_remaining(counter: Counter[tuple[str, str, int]]) -> int:
     return sum(max(value, 0) for value in counter.values())
 
 
-def remaining_for_search_language(counter: Counter[tuple[str, str]], search_language: str) -> int:
-    return sum(counter[(language, band)] for language in output_languages_for_search(search_language) for band in SIZE_BANDS)
+def remaining_for_search_language(counter: Counter[tuple[str, str, int]], search_language: str) -> int:
+    return sum(
+        count
+        for (language, _band, _decile), count in counter.items()
+        if language in output_languages_for_search(search_language)
+    )
 
 
 def top_repo_counts(records: list[dict[str, Any]], topn: int = 15) -> list[list[Any]]:
@@ -776,19 +871,20 @@ class ArmBExtractor:
         self.log_path = self.output_dir / OUTPUT_LOG
         self.patch_dir = self.output_dir / OUTPUT_PATCH_DIR
 
-        self.targets, self.arm_a_total, self.target_total = load_arm_a_distribution(
+        self.targets, self.arm_a_total, self.target_total, self.arm_a_decile_upper_bounds = load_arm_a_distribution(
             arm_a_path=self.arm_a_path,
             target_total=(args.target if args.target > 0 else None),
             oversample_factor=args.oversample_factor,
         )
-        self.remaining_targets: Counter[tuple[str, str]] = Counter(self.targets)
+        self.remaining_targets: Counter[tuple[str, str, int]] = Counter(self.targets)
 
         self.records: list[dict[str, Any]] = []
         self.excluded_count = 0
         self.excluded_by_reason: Counter[str] = Counter()
         self.included_by_language: Counter[str] = Counter()
-        self.included_by_cell: Counter[tuple[str, str]] = Counter()
+        self.included_by_cell: Counter[tuple[str, str, int]] = Counter()
         self.repo_counts: Counter[str] = Counter()
+        self.repo_band_counts: Counter[tuple[str, str, str]] = Counter()
         self.seen_patch_shas: set[str] = set()
         self.seen_file_keys: set[tuple[str, str, str]] = set()
         self.completed_prs: set[tuple[str, str]] = set()
@@ -812,7 +908,7 @@ class ArmBExtractor:
 
         self.migrated_existing_records = 0
         self.dropped_existing_records = 0
-        self.overfilled_existing_cells: Counter[tuple[str, str]] = Counter()
+        self.overfilled_existing_cells: Counter[tuple[str, str, int]] = Counter()
 
         self.api_requests_offset = 0
         self.request_status_offset: Counter[str] = Counter()
@@ -826,9 +922,32 @@ class ArmBExtractor:
     def output_languages_remaining(self) -> set[str]:
         return {
             language
-            for (language, _band), count in self.remaining_targets.items()
+            for (language, _band, _decile), count in self.remaining_targets.items()
             if count > 0
         }
+
+    def prioritized_search_languages(self) -> list[str]:
+        start = self.current_search_index % len(SEARCH_LANGUAGES)
+        rotated = [SEARCH_LANGUAGES[(start + offset) % len(SEARCH_LANGUAGES)] for offset in range(len(SEARCH_LANGUAGES))]
+        return sorted(
+            rotated,
+            key=lambda language: remaining_for_search_language(self.remaining_targets, language),
+            reverse=True,
+        )
+
+    def arm_a_target_decile_for(self, language: str, file_line_count: int) -> int:
+        return target_decile_for_line_count(
+            language,
+            file_line_count,
+            decile_upper_bounds=self.arm_a_decile_upper_bounds,
+        )
+
+    def target_cell_for(self, language: str, size_band: str, file_line_count: int) -> tuple[str, str, int]:
+        return (
+            language,
+            size_band,
+            self.arm_a_target_decile_for(language, file_line_count),
+        )
 
     def ensure_output_dir(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -874,7 +993,7 @@ class ArmBExtractor:
 
         if self.state_path.exists():
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
-            if parse_int(payload.get("state_version")) in {2, STATE_VERSION}:
+            if parse_int(payload.get("state_version")) in {2, 3, STATE_VERSION}:
                 self.validate_resume_configuration(payload)
                 self.load_state_payload(payload)
                 legacy_state_loaded = True
@@ -904,7 +1023,6 @@ class ArmBExtractor:
             "arm_a_path": str(self.arm_a_path),
             "target_total": self.target_total,
             "seed": self.args.seed,
-            "repo_cap": self.args.repo_cap,
         }
         for key, expected_value in expected.items():
             actual_value = payload.get(key)
@@ -912,6 +1030,11 @@ class ArmBExtractor:
                 raise RuntimeError(
                     f"Cannot resume with different {key}: existing={actual_value!r} requested={expected_value!r}"
                 )
+        existing_repo_cap = parse_int(payload.get("repo_cap"), self.args.repo_cap)
+        if self.args.repo_cap > existing_repo_cap:
+            raise RuntimeError(
+                f"Cannot resume with looser repo_cap: existing={existing_repo_cap!r} requested={self.args.repo_cap!r}"
+            )
 
     def load_state_payload(self, payload: dict[str, Any]) -> None:
         self.search_pages.update({key: parse_int(value, 1) for key, value in payload.get("search_pages", {}).items()})
@@ -1084,6 +1207,7 @@ class ArmBExtractor:
             "content": content,
             "file_line_count": file_line_count,
             "size_band": size_band,
+            "arm_a_target_decile": self.arm_a_target_decile_for(normalized_language, file_line_count),
             "patch_lines": patch_lines,
             "size_decile": parse_int(raw.get("size_decile"), 0),
             "patch_sha": patch_sha_value,
@@ -1094,6 +1218,7 @@ class ArmBExtractor:
     def register_existing_record(self, record: dict[str, Any]) -> None:
         internal_language = normalize_language(record.get("language"))
         band = str(record.get("size_band") or "")
+        file_line_count = parse_int(record.get("file_line_count"))
         repo = str(record.get("repo") or "")
         path = str(record.get("file_path") or record.get("path") or "")
         pr_identifier = str(record.get("pr_number") or record.get("pr_identifier") or "")
@@ -1103,13 +1228,19 @@ class ArmBExtractor:
             raise RuntimeError(f"invalid existing record shape for {repo} {path}")
 
         self.included_by_language[internal_language] += 1
-        self.included_by_cell[(internal_language, band)] += 1
-        if self.remaining_targets[(internal_language, band)] > 0:
-            self.remaining_targets[(internal_language, band)] -= 1
+        target_decile = parse_int(record.get("arm_a_target_decile"), -1)
+        if target_decile not in SIZE_DECILES:
+            target_decile = self.arm_a_target_decile_for(internal_language, file_line_count)
+            record["arm_a_target_decile"] = target_decile
+        strict_cell = (internal_language, band, target_decile)
+        self.included_by_cell[strict_cell] += 1
+        if self.remaining_targets[strict_cell] > 0:
+            self.remaining_targets[strict_cell] -= 1
         else:
-            self.overfilled_existing_cells[(internal_language, band)] += 1
+            self.overfilled_existing_cells[strict_cell] += 1
 
         self.repo_counts[repo] += 1
+        self.repo_band_counts[(repo, internal_language, band)] += 1
         self.seen_patch_shas.add(patch_sha_value)
         self.seen_file_keys.add((repo, path, pr_identifier))
 
@@ -1199,11 +1330,15 @@ class ArmBExtractor:
             "current_repo": self.current_repo,
             "accepted_total": len(self.records),
             "included_by_language": dict(sorted(self.included_by_language.items())),
-            "included_by_language_band": dict(sorted(serialize_counter_by_cell(self.included_by_cell).items())),
-            "target_by_language_band": dict(sorted(serialize_counter_by_cell(self.targets).items())),
+            "included_by_language_band": dict(sorted(serialize_counter_by_band(self.included_by_cell).items())),
+            "target_by_language_band": dict(sorted(serialize_counter_by_band(self.targets).items())),
             "remaining_total": total_remaining(self.remaining_targets),
-            "remaining_by_language_band": dict(sorted(serialize_counter_by_cell(self.remaining_targets).items())),
-            "overfilled_existing_by_language_band": dict(sorted(serialize_counter_by_cell(self.overfilled_existing_cells).items())),
+            "remaining_by_language_band": dict(sorted(serialize_counter_by_band(self.remaining_targets).items())),
+            "overfilled_existing_by_language_band": dict(sorted(serialize_counter_by_band(self.overfilled_existing_cells).items())),
+            "included_by_language_band_decile": dict(sorted(serialize_counter_by_strict_cell(self.included_by_cell).items())),
+            "target_by_language_band_decile": dict(sorted(serialize_counter_by_strict_cell(self.targets).items())),
+            "remaining_by_language_band_decile": dict(sorted(serialize_counter_by_strict_cell(self.remaining_targets).items())),
+            "overfilled_existing_by_language_band_decile": dict(sorted(serialize_counter_by_strict_cell(self.overfilled_existing_cells).items())),
             "excluded_count": self.excluded_count,
             "excluded_by_reason": dict(sorted(self.excluded_by_reason.items())),
             "api_requests": self.total_api_requests(client),
@@ -1219,6 +1354,9 @@ class ArmBExtractor:
             "completed_pr_count": len(self.completed_prs),
             "pending_legacy_records": len(self.pending_legacy_records),
             "unique_repos": len(self.repo_counts),
+            "repos_at_repo_cap": sum(1 for count in self.repo_counts.values() if count >= self.args.repo_cap),
+            "repos_above_repo_cap": sum(1 for count in self.repo_counts.values() if count > self.args.repo_cap),
+            "max_files_per_repo": max(self.repo_counts.values(), default=0),
             "top_repo_counts": top_repo_counts(self.records),
             "migrated_existing_records": self.migrated_existing_records,
             "dropped_existing_records": self.dropped_existing_records,
@@ -1243,9 +1381,12 @@ class ArmBExtractor:
             "current_search_language": self.current_search_language,
             "current_repo": self.current_repo,
             "current_phase": self.current_phase,
-            "targets": serialize_counter_by_cell(self.targets),
-            "remaining_targets": serialize_counter_by_cell(self.remaining_targets),
-            "included_by_cell": serialize_counter_by_cell(self.included_by_cell),
+            "targets_by_strict_cell": serialize_counter_by_strict_cell(self.targets),
+            "remaining_targets_by_strict_cell": serialize_counter_by_strict_cell(self.remaining_targets),
+            "included_by_strict_cell": serialize_counter_by_strict_cell(self.included_by_cell),
+            "targets_by_band": serialize_counter_by_band(self.targets),
+            "remaining_targets_by_band": serialize_counter_by_band(self.remaining_targets),
+            "included_by_band": serialize_counter_by_band(self.included_by_cell),
             "included_by_language": dict(self.included_by_language),
             "completed_prs": sorted(list(self.completed_prs)),
             "api_requests": self.total_api_requests(client),
@@ -1299,6 +1440,7 @@ class ArmBExtractor:
     ) -> None:
         language = candidate["language"]
         band = candidate["size_band"]
+        target_decile = self.arm_a_target_decile_for(language, candidate["file_line_count"])
         record = {
             "repo": repo,
             "repo_name": repo,
@@ -1314,6 +1456,7 @@ class ArmBExtractor:
             "content": candidate["content"],
             "file_line_count": candidate["file_line_count"],
             "size_band": band,
+            "arm_a_target_decile": target_decile,
             "patch_lines": candidate["patch_lines"],
             "size_decile": 0,
             "patch_sha": candidate["patch_sha"],
@@ -1324,9 +1467,10 @@ class ArmBExtractor:
         self.seen_patch_shas.add(candidate["patch_sha"])
         self.seen_file_keys.add((repo, candidate["path"], str(pr_number)))
         self.included_by_language[language] += 1
-        self.included_by_cell[(language, band)] += 1
-        self.remaining_targets[(language, band)] = max(0, self.remaining_targets[(language, band)] - 1)
+        self.included_by_cell[(language, band, target_decile)] += 1
+        self.remaining_targets[(language, band, target_decile)] = max(0, self.remaining_targets[(language, band, target_decile)] - 1)
         self.repo_counts[repo] += 1
+        self.repo_band_counts[(repo, language, band)] += 1
         self.accepted_since_checkpoint += 1
 
         patch_path = self.patch_dir / f"{candidate['patch_sha']}.patch"
@@ -1846,7 +1990,11 @@ class ArmBExtractor:
                         cursor["file_index"] = file_index + 1
                         continue
 
-                    cell_key = (output_language, candidate["size_band"])
+                    target_decile = self.arm_a_target_decile_for(
+                        output_language,
+                        candidate["file_line_count"],
+                    )
+                    cell_key = (output_language, candidate["size_band"], target_decile)
                     if self.remaining_targets[cell_key] <= 0:
                         self.append_exclusion(
                             repo=repo,
@@ -1854,7 +2002,7 @@ class ArmBExtractor:
                             file_path=filename,
                             language=output_language,
                             reason="target_already_satisfied",
-                            detail=f"{output_language}:{candidate['size_band']}",
+                            detail=f"{output_language}:{candidate['size_band']}:{target_decile}",
                             stage="file",
                         )
                         cursor["file_index"] = file_index + 1
@@ -1996,9 +2144,7 @@ class ArmBExtractor:
                 )
                 while total_remaining(self.remaining_targets) > 0:
                     progress_this_cycle = 0
-                    cycle_start = self.current_search_index % len(SEARCH_LANGUAGES)
-                    for offset in range(len(SEARCH_LANGUAGES)):
-                        search_language = SEARCH_LANGUAGES[(cycle_start + offset) % len(SEARCH_LANGUAGES)]
+                    for search_language in self.prioritized_search_languages():
                         self.current_search_index = (SEARCH_LANGUAGES.index(search_language) + 1) % len(SEARCH_LANGUAGES)
                         if remaining_for_search_language(self.remaining_targets, search_language) <= 0:
                             continue
@@ -2070,7 +2216,7 @@ class ArmBExtractor:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build a bulletproof Arm B candidate pool aligned to Arm A.")
-    parser.add_argument("--arm-a", default=str(DEFAULT_ARM_A), help="Arm A JSONL used to derive language and size-band targets.")
+    parser.add_argument("--arm-a", default=str(DEFAULT_ARM_A), help="Arm A JSONL used to derive language, size-band, and decile targets.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Directory for index/excluded/summary/state/patch outputs.")
     parser.add_argument("--target", type=int, default=DEFAULT_TARGET, help="Exact candidate-pool target total. Use 0 to derive from Arm A * oversample factor.")
     parser.add_argument("--oversample-factor", type=float, default=DEFAULT_OVERSAMPLE_FACTOR, help="Used only when --target is 0.")
@@ -2122,7 +2268,7 @@ def main() -> int:
     )
     logging.info(
         "Quota summary: %s",
-        dict(sorted(serialize_counter_by_cell(extractor.targets).items())),
+        dict(sorted(serialize_counter_by_band(extractor.targets).items())),
     )
     logging.info(
         "Round-robin settings: stage_accept_limit=%d repo_pr_page_budget_per_turn=%d max_pr_pages_per_repo_total=%d",
