@@ -27,6 +27,14 @@ from typing import Any
 LANGUAGES = ["JavaScript", "Python", "TypeScript"]
 SIZE_BANDS = ("100_299", "300_999", "1000_plus")
 DEFAULT_FINAL_REPO_CAP = 4
+LANGUAGE_ALIASES = {
+    "javascript": "JavaScript",
+    "js": "JavaScript",
+    "python": "Python",
+    "py": "Python",
+    "typescript": "TypeScript",
+    "ts": "TypeScript",
+}
 
 
 def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -37,6 +45,13 @@ def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
             if line:
                 records.append(json.loads(line))
     return records
+
+
+def normalize_language(value: Any) -> str:
+    raw = str(value or "").strip()
+    if raw in LANGUAGES:
+        return raw
+    return LANGUAGE_ALIASES.get(raw.lower(), raw)
 
 
 def write_jsonl(records: list[dict[str, Any]], path: Path) -> None:
@@ -103,9 +118,10 @@ def size_band(record: dict[str, Any]) -> str:
 def assign_deciles(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_lang: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
-        language = str(record.get("language") or "")
+        language = normalize_language(record.get("language"))
         if language in LANGUAGES:
             enriched = dict(record)
+            enriched["language"] = language
             enriched["file_line_count"] = size_value(enriched)
             enriched["size_band"] = size_band(enriched)
             by_lang[language].append(enriched)

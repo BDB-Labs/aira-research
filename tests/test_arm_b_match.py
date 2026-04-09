@@ -22,6 +22,34 @@ def make_record(*, repo: str, pr: int, path: str, lines: int, language: str = "J
 
 
 class ArmBMatchTests(unittest.TestCase):
+    def test_matched_draw_normalizes_lowercase_language_labels(self) -> None:
+        arm_a = [
+            make_record(
+                repo=f"anchor/repo-{index}",
+                pr=index,
+                path=f"src/a{index}.py",
+                lines=100 + (index * 100),
+                language="python",
+            )
+            for index in range(10)
+        ]
+        pool = [
+            make_record(
+                repo=f"pool/repo-{index}",
+                pr=1000 + index,
+                path=f"src/p{index}.py",
+                lines=100 + (index * 100),
+                language="Python",
+            )
+            for index in range(10)
+        ]
+
+        selected, diagnostics = arm_b_match.matched_draw(pool, arm_a, 10, 42, 4)
+
+        self.assertEqual(len(selected), 10)
+        self.assertEqual(diagnostics["language_counts"], {"Python": 10})
+        self.assertEqual(diagnostics["shortfall_total"], 0)
+
     def test_size_value_prefers_file_line_count_over_patch_lines(self) -> None:
         record = {
             "repo": "owner/repo",
