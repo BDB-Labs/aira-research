@@ -331,6 +331,24 @@ class ArmBExtractTests(unittest.IsolatedAsyncioTestCase):
         client._get_json = fake_get_json
         self.assertIsNone(await client.get_file_text("owner/repo", ".github/workflows/tests", ref="main"))
 
+    async def test_resolve_gh_cli_falls_back_to_common_mac_path(self) -> None:
+        original_which = arm_b_extract.shutil.which
+        original_exists = arm_b_extract.Path.exists
+
+        def fake_which(_name: str) -> None:
+            return None
+
+        def fake_exists(path_obj: Path) -> bool:
+            return str(path_obj) == "/opt/homebrew/bin/gh"
+
+        arm_b_extract.shutil.which = fake_which
+        arm_b_extract.Path.exists = fake_exists
+        try:
+            self.assertEqual(arm_b_extract.resolve_gh_cli(), "/opt/homebrew/bin/gh")
+        finally:
+            arm_b_extract.shutil.which = original_which
+            arm_b_extract.Path.exists = original_exists
+
 
 if __name__ == "__main__":
     unittest.main()

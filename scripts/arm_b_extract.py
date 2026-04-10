@@ -99,6 +99,12 @@ DEFAULT_CHECKPOINT_EVERY_SECONDS = 60
 PR_DATE_START = "2022-01-01"
 PR_DATE_END = "2025-12-31"
 
+COMMON_GH_PATHS = (
+    "/opt/homebrew/bin/gh",
+    "/usr/local/bin/gh",
+    "/usr/bin/gh",
+)
+
 HTTP_TIMEOUT_SECONDS = 30
 HTTP_CONCURRENCY = 6
 HTTP_RETRY_BACKOFF_SECONDS = (2, 5, 15, 30)
@@ -210,6 +216,16 @@ def normalize_language(value: Any) -> Optional[str]:
         "type script": "typescript",
     }
     return aliases.get(raw)
+
+
+def resolve_gh_cli() -> str | None:
+    found = shutil.which("gh")
+    if found:
+        return found
+    for candidate in COMMON_GH_PATHS:
+        if Path(candidate).exists():
+            return candidate
+    return None
 
 
 def display_language(language: str) -> str:
@@ -2115,8 +2131,11 @@ class ArmBExtractor:
         token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
         if not token:
             try:
+                gh_cli = resolve_gh_cli()
+                if not gh_cli:
+                    raise FileNotFoundError("gh")
                 result = subprocess.run(
-                    ["gh", "auth", "token"],
+                    [gh_cli, "auth", "token"],
                     check=True,
                     capture_output=True,
                     text=True,
