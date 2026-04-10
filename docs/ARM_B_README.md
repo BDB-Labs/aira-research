@@ -47,6 +47,14 @@ Takes the pool and draws the final Arm B sample aligned to Arm A with strict
 language equality, strict size-band equality, Arm A size-decile mirroring,
 same-repo preference, nearest line-count tie-breaking, and a final repo cap.
 
+### `scripts/arm_b_supervisor.py`
+
+Wraps the extractor and auto-resumes after retryable failures. It is meant for
+the exact failure mode we have seen in live runs: the extractor exits `75`
+after checkpointing on DNS / transport / GitHub request failure, then the
+supervisor sleeps for a fixed interval and relaunches the extractor with
+`--resume`.
+
 ### `docs/ARM_B_README.md`
 
 Run sequence, defaults, and reproducibility notes.
@@ -73,6 +81,21 @@ python scripts/arm_b_extract.py \
   --resume
 ```
 
+Run the same workflow under automatic restart supervision:
+
+```bash
+python scripts/arm_b_supervisor.py \
+  --restart-delay-minutes 15 \
+  --caffeinate \
+  --arm-a /Users/billp/Documents/AIRA/data/aidev_arm_a_staged_1000_sample.jsonl \
+  --output-dir /Users/billp/Documents/AIRA/data/arm_b \
+  --target 1500 \
+  --seed 42 \
+  --repo-cap 4 \
+  --resume \
+  --log INFO
+```
+
 Notes:
 
 - `--target` is the exact candidate-pool total.
@@ -80,6 +103,7 @@ Notes:
 - `--fresh` clears prior extractor artifacts in the output directory.
 - `--resume` requires the same `arm_a`, `target`, `seed`, and `repo_cap` as the original run.
 - If older patch-only rows are present, resume will try to hydrate full file content from GitHub using the recorded `commit_sha`.
+- The supervisor will preserve your initial extractor flags, strip `--fresh` on retries, and force `--resume` after the first retryable failure.
 
 ### Collection behavior
 
@@ -117,6 +141,13 @@ Important exit codes:
 - `2`: clean stop with shortfalls still remaining
 - `75`: fatal GitHub/network failure after checkpoint
 - `130`: interrupted by user after checkpoint
+
+Supervisor behavior:
+
+- retries exit code `75` by default
+- sleeps `15` minutes by default before restart
+- writes its own events to `supervisor.log`
+- stops on exit `0`, `2`, `130`, or any non-retryable unexpected failure
 
 ## Step 2 — Draw the matched Arm B sample
 
@@ -223,3 +254,4 @@ decile rewrite.
 3. Resume with `--resume` until `summary.json` shows a sufficiently large pool.
 4. Inspect `summary.json` for remaining `language x size_band` shortfalls and repo concentration.
 5. Run `arm_b_match.py` only after the pool is large enough to support the final draw.
+6. For unattended runs, prefer `arm_b_supervisor.py` instead of manually relaunching `arm_b_extract.py`.
